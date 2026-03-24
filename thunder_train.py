@@ -302,6 +302,15 @@ def train(args):
             # Forward + backward
             loss, grads = loss_and_grad_fn(model, inputs, targets)
 
+            # CRITICAL: Materialize loss + grads BEFORE the distributed all-reduce.
+            # Without this, MLX's lazy graph combines forward/backward + TCP ring sync
+            # into a single Metal command buffer submission. The TCP wait between nodes
+            # causes the GPU to appear stalled, triggering the Metal watchdog timeout
+            # (kIOGPUCommandBufferCallbackErrorTimeout). Qwen3-8B's larger arch
+            # (36 layers, 4096 dim vs 32/3584 for 7B) makes this worse.
+            # Splitting into two evals: (1) compute grads, (2) sync + update.
+            mx.eval(loss, *[v for _, v in tree_flatten(grads)])
+
             # Sync gradients across machines (ring all-reduce)
             if group.size() > 1:
                 grads = nn.average_gradients(grads, group=group)
@@ -312,8 +321,8 @@ def train(args):
             # Optimizer step
             optimizer.update(model, grads)
 
-            # Evaluate to materialize the computation graph
-            mx.eval(model.parameters(), optimizer.state, loss)
+            # Evaluate optimizer update
+            mx.eval(model.parameters(), optimizer.state)
 
             t1 = time.time()
             step += 1
