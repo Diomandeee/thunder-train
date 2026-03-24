@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Adapter weights (large binary files)
+*.safetensors
+adapters.safetensors
+
+# Checkpoint state
+checkpoint.json
+adapter_config.json
+
+# Test artifacts
+test_hello.py
+test_ring.py
+/tmp/
+
+# Local hostfile (users should create their own)
+# hostfile.json is included as an example
