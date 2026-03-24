@@ -286,6 +286,21 @@ def train(args):
     log(f"Adapter:    {args.adapter_path}")
     log(f"{'='*60}\n")
 
+    # Warm up Metal shader cache with a dummy forward+backward pass.
+    # On the first run with a given model, Metal JIT-compiles kernels for the
+    # specific matrix dimensions (batch, seq, hidden, vocab). On cold machines
+    # this compilation can be slow enough to trigger the GPU watchdog during
+    # the first real distributed step. Running one dummy step pre-warms the cache.
+    if group.size() > 1:
+        log("Warming up Metal shader cache (distributed mode)...", force=True)
+        _dummy_len = min(32, args.max_seq_len)
+        _dummy_in = mx.zeros((1, _dummy_len), dtype=mx.int32)
+        _dummy_tgt = mx.zeros((1, _dummy_len), dtype=mx.int32)
+        _dummy_loss, _dummy_grads = loss_and_grad_fn(model, _dummy_in, _dummy_tgt)
+        mx.eval(_dummy_loss, *[v for _, v in tree_flatten(_dummy_grads)])
+        del _dummy_loss, _dummy_grads, _dummy_in, _dummy_tgt
+        log("Metal warmup done.", force=True)
+
     step = start_step
     epoch = 0
     best_val_loss = float("inf")
@@ -314,6 +329,10 @@ def train(args):
             # Sync gradients across machines (ring all-reduce)
             if group.size() > 1:
                 grads = nn.average_gradients(grads, group=group)
+                # Force all-reduce TCP communication to complete BEFORE submitting
+                # any optimizer Metal command buffers. Without this, Metal can timeout
+                # if it receives the optimizer commands before TCP completes.
+                mx.eval(*[v for _, v in tree_flatten(grads)])
 
             # Clip gradients to prevent NaN/explosion (esp. with 4-bit quant models)
             grads, _ = opt.clip_grad_norm(grads, max_norm=1.0)
@@ -321,7 +340,7 @@ def train(args):
             # Optimizer step
             optimizer.update(model, grads)
 
-            # Evaluate optimizer update
+            # Evaluate optimizer update (Metal only — no more TCP ops in graph)
             mx.eval(model.parameters(), optimizer.state)
 
             t1 = time.time()
