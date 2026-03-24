@@ -19,6 +19,7 @@ import math
 import os
 import sys
 import time
+from functools import partial
 from pathlib import Path
 
 import mlx.core as mx
@@ -270,6 +271,30 @@ def train(args):
     # Compile loss + grad function
     loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
 
+    # Compile the entire training step into a single MLX program.
+    # This is the critical fix for the Metal GPU watchdog timeout on Qwen3-8B:
+    #
+    # WITHOUT mx.compile: Python orchestrates forward→eval→all_reduce→eval→optim→eval
+    # as separate Metal command buffer submissions. The ring TCP communication
+    # happens between Metal submissions, leaving the GPU idle while waiting for
+    # TCP data. Metal's watchdog fires (kIOGPUCommandBufferCallbackErrorTimeout).
+    #
+    # WITH mx.compile: MLX sees the ENTIRE computation graph including the
+    # distributed all_reduce and schedules communication/compute to overlap
+    # correctly, preventing the stall that triggers the watchdog.
+    #
+    # This matches how mlx_lm's own distributed trainer works (trainer.py:235).
+    _train_state = [model.state, optimizer.state]
+
+    @partial(mx.compile, inputs=_train_state, outputs=_train_state)
+    def compiled_step(inputs, targets):
+        loss, grads = loss_and_grad_fn(model, inputs, targets)
+        if group.size() > 1:
+            grads = nn.average_gradients(grads, group=group)
+        grads, _ = opt.clip_grad_norm(grads, max_norm=1.0)
+        optimizer.update(model, grads)
+        return loss
+
     # Resume from checkpoint if exists
     start_step = 0
     if args.resume and args.adapter_path and os.path.exists(args.adapter_path):
@@ -297,21 +322,6 @@ def train(args):
     log(f"Adapter:    {args.adapter_path}")
     log(f"{'='*60}\n")
 
-    # Warm up Metal shader cache with a dummy forward+backward pass.
-    # On the first run with a given model, Metal JIT-compiles kernels for the
-    # specific matrix dimensions (batch, seq, hidden, vocab). On cold machines
-    # this compilation can be slow enough to trigger the GPU watchdog during
-    # the first real distributed step. Running one dummy step pre-warms the cache.
-    if group.size() > 1:
-        log("Warming up Metal shader cache (distributed mode)...", force=True)
-        _dummy_len = min(32, args.max_seq_len)
-        _dummy_in = mx.zeros((1, _dummy_len), dtype=mx.int32)
-        _dummy_tgt = mx.zeros((1, _dummy_len), dtype=mx.int32)
-        _dummy_loss, _dummy_grads = loss_and_grad_fn(model, _dummy_in, _dummy_tgt)
-        mx.eval(_dummy_loss, *[v for _, v in tree_flatten(_dummy_grads)])
-        del _dummy_loss, _dummy_grads, _dummy_in, _dummy_tgt
-        log("Metal warmup done.", force=True)
-
     step = start_step
     epoch = 0
     best_val_loss = float("inf")
@@ -325,34 +335,8 @@ def train(args):
 
             t0 = time.time()
 
-            # Forward + backward
-            loss, grads = loss_and_grad_fn(model, inputs, targets)
-
-            # CRITICAL: Materialize loss + grads BEFORE the distributed all-reduce.
-            # Without this, MLX's lazy graph combines forward/backward + TCP ring sync
-            # into a single Metal command buffer submission. The TCP wait between nodes
-            # causes the GPU to appear stalled, triggering the Metal watchdog timeout
-            # (kIOGPUCommandBufferCallbackErrorTimeout). Qwen3-8B's larger arch
-            # (36 layers, 4096 dim vs 32/3584 for 7B) makes this worse.
-            # Splitting into two evals: (1) compute grads, (2) sync + update.
-            mx.eval(loss, *[v for _, v in tree_flatten(grads)])
-
-            # Sync gradients across machines (ring all-reduce)
-            if group.size() > 1:
-                grads = nn.average_gradients(grads, group=group)
-                # Force all-reduce TCP communication to complete BEFORE submitting
-                # any optimizer Metal command buffers. Without this, Metal can timeout
-                # if it receives the optimizer commands before TCP completes.
-                mx.eval(*[v for _, v in tree_flatten(grads)])
-
-            # Clip gradients to prevent NaN/explosion (esp. with 4-bit quant models)
-            grads, _ = opt.clip_grad_norm(grads, max_norm=1.0)
-
-            # Optimizer step
-            optimizer.update(model, grads)
-
-            # Evaluate optimizer update (Metal only — no more TCP ops in graph)
-            mx.eval(model.parameters(), optimizer.state)
+            loss = compiled_step(inputs, targets)
+            mx.eval(_train_state, loss)
 
             t1 = time.time()
             step += 1
