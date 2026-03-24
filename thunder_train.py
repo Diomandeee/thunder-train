@@ -249,6 +249,17 @@ def train(args):
         log(f"Loading validation data: {args.valid_data}")
         valid_dataset = ChatMLDataset(args.valid_data, tokenizer, max_seq_len=args.max_seq_len)
 
+    # Synchronize all ranks after data loading, before any Metal work.
+    # Without this barrier, rank 0 (which loads data faster) can enter
+    # the Metal warmup while rank 1 is still reading 98K training samples.
+    # The ring backend syncs at mx.eval() time — rank 0 blocks waiting for
+    # rank 1, Metal sees the GPU stalled, and the watchdog fires.
+    if group.size() > 1:
+        log("All ranks syncing after data load...", force=True)
+        _sync = mx.distributed.all_sum(mx.array([group.rank()], dtype=mx.float32), group=group)
+        mx.eval(_sync)
+        log("All ranks ready.", force=True)
+
     # Optimizer — AdamW with cosine schedule
     warmup_iters = max(1, min(100, args.num_iters // 10))
     warmup = opt.linear_schedule(1e-7, args.learning_rate, warmup_iters)
