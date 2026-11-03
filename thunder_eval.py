@@ -8,8 +8,8 @@ and computes perplexity on the eval set.
 Usage:
   python3 thunder_eval.py \
     --model mlx-community/Qwen2.5-7B-Instruct-4bit \
-    --adapter-path ~/projects/karl/thunder-adapter-v1 \
-    --eval-data ~/projects/karl/autocontinue-data/eval_merged.jsonl \
+    --adapter-path ~/adapters/my-adapter \
+    --eval-data ~/data/eval_merged.jsonl \
     --num-samples 5
 """
 
@@ -137,9 +137,9 @@ def main():
     # Sample completions
     test_prompts = [
         "What should we prioritize for the next sprint?",
-        "The build is failing on Mac4, what should I check?",
+        "The build is failing on the build machine, what should I check?",
         "How should we handle the Supabase migration?",
-        "The exo cluster keeps dropping Mac5, what's going on?",
+        "The exo cluster keeps dropping one node, what's going on?",
         "Should we use data parallel or tensor parallel for 14B?",
     ]
 

@@ -1,15 +1,15 @@
 #!/bin/bash
-# launch.sh — Launch thunder-train across Mac4 + Mac5 via mlx.launch
+# launch.sh — Launch thunder-train across the nodes in hostfile.json via mlx.launch
 #
 # Uses the ring backend over the Thunderbolt interface (10.0.5.x).
 # All arguments after the script name are passed through to thunder_train.py.
 #
 # Usage:
 #   ./launch.sh --model mlx-community/Qwen2.5-7B-Instruct-4bit \
-#     --train-data ~/projects/karl/autocontinue-data/train_merged.jsonl \
-#     --valid-data ~/projects/karl/autocontinue-data/eval_merged.jsonl \
+#     --train-data ~/data/train_merged.jsonl \
+#     --valid-data ~/data/eval_merged.jsonl \
 #     --strategy data --num-iters 800 --batch-size 4 \
-#     --adapter-path ~/projects/karl/thunder-adapter-v1
+#     --adapter-path ~/adapters/my-adapter
 
 set -euo pipefail
 
@@ -65,8 +65,13 @@ echo -e "${GREEN}OK${NC}"
 
 # Quick connectivity check (non-blocking, 2s timeout)
 echo -n "Checking TB link... "
-if ping -c 1 -W 2000 10.0.5.1 &> /dev/null && ping -c 1 -W 2000 10.0.5.2 &> /dev/null; then
-    echo -e "${GREEN}Mac4 + Mac5 reachable${NC}"
+NODE_IPS=$(python3 -c "import json,sys; print(' '.join(n['ips'][0] for n in json.load(open(sys.argv[1]))))" "$HOSTFILE")
+ALL_UP=1
+for ip in $NODE_IPS; do
+    ping -c 1 -W 2000 "$ip" &> /dev/null || ALL_UP=0
+done
+if [ "$ALL_UP" -eq 1 ]; then
+    echo -e "${GREEN}all nodes reachable ($NODE_IPS)${NC}"
 else
     echo -e "${YELLOW}WARNING: Could not ping both machines. Proceeding anyway (mlx.launch will report SSH errors).${NC}"
 fi

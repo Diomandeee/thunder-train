@@ -2,8 +2,8 @@
 """
 thunder_status.py — Check readiness of the Thunder-Train cluster.
 
-Pings Mac4 + Mac5, checks MLX versions, reports GPU memory,
-and measures TB5 link latency.
+Reads the nodes from hostfile.json, pings each over the Thunderbolt link,
+checks MLX versions and reports unified memory.
 
 Usage:
   python3 thunder_status.py
@@ -15,10 +15,17 @@ import sys
 import time
 from pathlib import Path
 
-HOSTS = [
-    {"name": "Mac4", "ssh": "mac4", "ip": "10.0.5.1"},
-    {"name": "Mac5", "ssh": "mac5", "ip": "10.0.5.2"},
-]
+HOSTFILE = Path(__file__).parent / "hostfile.json"
+
+
+def load_hosts(hostfile=HOSTFILE):
+    """One entry per node in hostfile.json: SSH alias plus its first link IP."""
+    with open(hostfile) as f:
+        return [{"name": node["ssh"], "ssh": node["ssh"], "ip": node["ips"][0]}
+                for node in json.load(f)]
+
+
+HOSTS = load_hosts() if HOSTFILE.exists() else []
 
 
 def run_ssh(host_ssh, command, timeout=10):
@@ -151,14 +158,14 @@ def main():
 
     # TB link quality (inter-node latency)
     print("--- Thunderbolt Link Quality ---")
-    reachable_4, lat_4 = ping_host("10.0.5.1", count=10)
-    reachable_5, lat_5 = ping_host("10.0.5.2", count=10)
-    if reachable_4 and reachable_5:
-        print(f"  Mac4 latency (10-ping avg): {lat_4:.2f}ms")
-        print(f"  Mac5 latency (10-ping avg): {lat_5:.2f}ms")
-        if lat_4 < 1.0 and lat_5 < 1.0:
+    pings = [(host["name"], *ping_host(host["ip"], count=10)) for host in HOSTS]
+    if pings and all(reachable for _, reachable, _ in pings):
+        for name, _, latency in pings:
+            print(f"  {name} latency (10-ping avg): {latency:.2f}ms")
+        worst = max(latency for _, _, latency in pings)
+        if worst < 1.0:
             print(f"  Link quality: EXCELLENT (sub-millisecond)")
-        elif lat_4 < 5.0 and lat_5 < 5.0:
+        elif worst < 5.0:
             print(f"  Link quality: GOOD")
         else:
             print(f"  Link quality: DEGRADED (check TB cable)")

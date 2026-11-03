@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-thunder_train.py — Distributed LoRA training across Mac4 + Mac5 via Thunderbolt.
+thunder_train.py — Distributed LoRA training across two Apple Silicon Macs over Thunderbolt.
 
 Uses MLX native distributed primitives (mx.distributed, nn.average_gradients)
 with the ring backend over the TB link (10.0.5.x subnet).
